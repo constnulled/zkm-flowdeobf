@@ -1,5 +1,9 @@
 # Static control-flow deobfuscator
 
+<p align="center">
+  <img src="./img/deobf.jpg" alt="Static control-flow deobfuscator">
+</p>
+
 An offline, conservative ASM 9.7.1 command-line toolkit for statically
 normalizing obfuscated JVM archives. It never loads, initializes, executes, or
 reflectively queries classes from the input archive. Each class is parsed as an
@@ -589,3 +593,7 @@ decrypts all recorded values. `semantic-evidence.tsv`, `failures.tsv`,
 `audit.txt`, and `gate.txt` distinguish a bytecode-fingerprint match from a unique
 candidate proof. Expected values are never written directly when the candidate
 proof fails.
+
+## 许可证
+
+本仓库采用 [MIT](LICENSE) 许可。
