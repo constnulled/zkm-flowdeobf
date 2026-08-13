@@ -161,7 +161,12 @@ public final class ConstantResidualIslandCleaner {
                 ZkmClassRewriteTransaction.attempt(
                         original,
                         owner -> rewriteToFixedPoint(owner, work),
-                        ConstantResidualIslandCleaner::verifyFixedPoint);
+                        ConstantResidualIslandCleaner::verifyFixedPoint,
+                        owner -> {
+                            ClassWriter writer = new ClassWriter(0);
+                            owner.accept(writer);
+                            return writer.toByteArray();
+                        });
         if (!transaction.isCommitted() && work.removed != 0) {
             for (Island island : work.islands) {
                 if (!island.proven) continue;

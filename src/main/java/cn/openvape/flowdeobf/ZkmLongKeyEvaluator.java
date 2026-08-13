@@ -10,6 +10,7 @@ import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
+import org.objectweb.asm.tree.VarInsnNode;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -95,6 +96,7 @@ public final class ZkmLongKeyEvaluator {
         audit.add("population_permutations=" + buildStats.populationPermutations);
         audit.add("population_clones=" + buildStats.populationClones);
         audit.add("map_puts=" + buildStats.mapPuts);
+        audit.add("auxiliary_map_puts=" + buildStats.auxiliaryMapPuts);
         audit.add("map_entries=" + base.mapEntries.size());
         audit.add("permutation_targets=" + buildStats.permutationTargets);
         audit.add("permutation_writes=" + buildStats.permutationWrites);
@@ -234,7 +236,14 @@ public final class ZkmLongKeyEvaluator {
             } else if ("java/util/concurrent/ConcurrentHashMap".equals(call.owner)
                     && "put".equals(call.name)
                     && "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;".equals(call.desc)) {
-                if (resolved.size() < 2) throw new IllegalStateException("graph map put without two states");
+                if (resolved.size() == 1 && isAuxiliaryGraphPut(call)) {
+                    resolved.clear();
+                    stats.auxiliaryMapPuts++;
+                    continue;
+                }
+                if (resolved.size() != 2) {
+                    throw new IllegalStateException("graph map put without exactly two states");
+                }
                 StateValue key = resolved.get(resolved.size() - 2);
                 StateValue value = resolved.get(resolved.size() - 1);
                 model.mapPut(DIAGNOSTIC_REVERSE_INITIAL_MAP ? value : key,
@@ -244,6 +253,20 @@ public final class ZkmLongKeyEvaluator {
             }
         }
         if (stats.mapPuts == 0) throw new IllegalStateException("graph map is empty");
+    }
+
+    private static boolean isAuxiliaryGraphPut(MethodInsnNode put) {
+        AbstractInsnNode value = previousCode(put);
+        AbstractInsnNode resolve = previousCode(value);
+        AbstractInsnNode seed = previousCode(resolve);
+        AbstractInsnNode duplicateMap = previousCode(seed);
+        return value instanceof VarInsnNode
+                && value.getOpcode() == Opcodes.ALOAD
+                && resolve instanceof MethodInsnNode
+                && isStateResolve((MethodInsnNode) resolve)
+                && longConstant(seed) != null
+                && duplicateMap != null
+                && duplicateMap.getOpcode() == Opcodes.DUP;
     }
 
     private static void modifyStatePermutations(Model model, MethodNode method, BuildStats stats) {
@@ -406,8 +429,7 @@ public final class ZkmLongKeyEvaluator {
 
     private static int[] readIntArrayBefore(AbstractInsnNode end) {
         AbstractInsnNode start = end.getPrevious();
-        int scanned = 0;
-        while (start != null && start.getOpcode() != Opcodes.NEWARRAY && scanned++ < 1000) {
+        while (start != null && start.getOpcode() != Opcodes.NEWARRAY) {
             start = start.getPrevious();
         }
         if (!(start instanceof IntInsnNode) || ((IntInsnNode) start).operand != Opcodes.T_INT) {
@@ -435,12 +457,27 @@ public final class ZkmLongKeyEvaluator {
         return result;
     }
 
+    static int[] readIntArrayBeforeForTest(AbstractInsnNode end) {
+        return readIntArrayBefore(end);
+    }
+
     private static boolean isArrayClone(AbstractInsnNode put) {
         AbstractInsnNode cursor = previousCode(put);
+        boolean clone = false;
         for (int i = 0; cursor != null && i < 5; i++, cursor = previousCode(cursor)) {
             if (cursor instanceof MethodInsnNode) {
                 MethodInsnNode call = (MethodInsnNode) cursor;
-                if ("[I".equals(call.owner) && "clone".equals(call.name)) return true;
+                if (("[I".equals(call.owner) || "java/lang/Object".equals(call.owner))
+                        && "clone".equals(call.name)
+                        && "()Ljava/lang/Object;".equals(call.desc)) {
+                    clone = true;
+                }
+            } else if (clone && cursor instanceof FieldInsnNode) {
+                FieldInsnNode field = (FieldInsnNode) cursor;
+                return field.getOpcode() == Opcodes.GETSTATIC
+                        && STATE.equals(field.owner)
+                        && "e".equals(field.name)
+                        && "[I".equals(field.desc);
             }
         }
         return false;
@@ -583,6 +620,7 @@ public final class ZkmLongKeyEvaluator {
         int populationPermutations;
         int populationClones;
         int mapPuts;
+        int auxiliaryMapPuts;
         int permutationTargets;
         int permutationWrites;
         int chainLinks;

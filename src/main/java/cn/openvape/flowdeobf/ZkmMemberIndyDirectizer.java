@@ -76,12 +76,25 @@ public final class ZkmMemberIndyDirectizer {
 
     static Summary directize(Path input, Path reportDirectory, Path classMap,
                              Path methodMap, Path output) throws Exception {
+        return directize(input, reportDirectory, classMap, methodMap, output,
+                ZkmMemberProjection.load(classMap, methodMap), "mapped");
+    }
+
+    static Summary directizeIdentity(Path input, Path reportDirectory,
+                                     Path output) throws Exception {
+        return directize(input, reportDirectory, null, null, output,
+                ZkmMemberProjection.identity(), "identity-raw-symbols");
+    }
+
+    private static Summary directize(Path input, Path reportDirectory,
+                                     Path classMap, Path methodMap, Path output,
+                                     ZkmMemberProjection.Mapping mapping,
+                                     String projectionMode) throws Exception {
         validatePaths(input, output);
         Files.createDirectories(reportDirectory);
         List<EntryBytes> entries = readEntries(input);
         Map<String, byte[]> originalBytes = classBytes(entries);
         Map<String, ClassNode> classes = readClasses(originalBytes);
-        ZkmMemberProjection.Mapping mapping = ZkmMemberProjection.load(classMap, methodMap);
         InterfaceIndex interfaces = new InterfaceIndex(classes);
         Summary summary = new Summary();
         summary.parsedClasses = classes.size();
@@ -161,7 +174,7 @@ public final class ZkmMemberIndyDirectizer {
             }
         }
         writeReports(input, reportDirectory, classMap, methodMap, output, summary,
-                projectionAudit, results, verifierRows);
+                projectionAudit, results, verifierRows, projectionMode);
         System.out.println("sites=" + summary.sites
                 + " planned=" + summary.plannedSites
                 + " rewritten=" + summary.rewrittenSites
@@ -651,7 +664,8 @@ public final class ZkmMemberIndyDirectizer {
     private static void writeReports(
             Path input, Path reportDirectory, Path classMap, Path methodMap,
             Path output, Summary summary, ZkmMemberProjection.Audit projectionAudit,
-            List<SiteResult> results, List<String> verifierRows) throws IOException {
+            List<SiteResult> results, List<String> verifierRows,
+            String projectionMode) throws IOException {
         List<String> siteRows = new ArrayList<>();
         siteRows.add("class\tmethod\tinstruction\tindy_name\tindy_desc\tfirst_key"
                 + "\tsecond_key\traw_index\traw_kind\traw_owner\traw_name\traw_desc"
@@ -675,8 +689,9 @@ public final class ZkmMemberIndyDirectizer {
 
         List<String> audit = new ArrayList<>();
         audit.add("input=" + input.toAbsolutePath());
-        audit.add("class_map=" + classMap.toAbsolutePath());
-        audit.add("method_map=" + methodMap.toAbsolutePath());
+        audit.add("projection_mode=" + projectionMode);
+        audit.add("class_map=" + (classMap == null ? "" : classMap.toAbsolutePath()));
+        audit.add("method_map=" + (methodMap == null ? "" : methodMap.toAbsolutePath()));
         audit.add("parsed_classes=" + summary.parsedClasses);
         audit.add("site_classes=" + summary.siteClasses);
         audit.add("sites=" + summary.sites);

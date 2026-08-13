@@ -95,6 +95,11 @@ public final class ZkmNoPaddingLongArrayDeobfuscator {
     }
 
     static Summary rewrite(Path input, Path reportDirectory, Path output) throws Exception {
+        return rewrite(input, reportDirectory, output, null);
+    }
+
+    static Summary rewrite(Path input, Path reportDirectory, Path output,
+                           Path authority) throws Exception {
         if (output != null && input.toAbsolutePath().normalize()
                 .equals(output.toAbsolutePath().normalize())) {
             throw new IllegalArgumentException("output must not replace input");
@@ -108,6 +113,9 @@ public final class ZkmNoPaddingLongArrayDeobfuscator {
         Map<String, Long> isolated = safeClassKeys(classes, false);
         Map<String, Long> sequential = safeClassKeys(classes, true);
         Map<String, Long> hierarchy = safeHierarchyKeys(classes);
+        Map<String, Long> authorityKeys = authority == null
+                ? Collections.<String, Long>emptyMap()
+                : authorityKeys(authority);
 
         Summary summary = new Summary();
         summary.parsedClasses = classes.size();
@@ -120,7 +128,8 @@ public final class ZkmNoPaddingLongArrayDeobfuscator {
         Collections.sort(names);
         for (String name : names) {
             ClassNode owner = classes.get(name);
-            Candidate candidate = inspect(owner, validated, isolated, sequential, hierarchy);
+            Candidate candidate = inspect(owner, validated, isolated, sequential,
+                    hierarchy, authorityKeys);
             if (candidate == null) continue;
             candidates.add(candidate);
             summary.candidates++;
@@ -171,7 +180,8 @@ public final class ZkmNoPaddingLongArrayDeobfuscator {
     private static Candidate inspect(ClassNode owner, Map<String, Long> validated,
                                      Map<String, Long> isolated,
                                      Map<String, Long> sequential,
-                                     Map<String, Long> hierarchy) {
+                                     Map<String, Long> hierarchy,
+                                     Map<String, Long> authorityKeys) {
         MethodNode clinit = method(owner, "<clinit>", "()V");
         if (clinit == null) return null;
         Code code = new Code(clinit);
@@ -186,7 +196,7 @@ public final class ZkmNoPaddingLongArrayDeobfuscator {
         for (int factory : factories) {
             try {
                 Candidate candidate = locate(owner, clinit, code, factory,
-                        validated, isolated, sequential, hierarchy);
+                        validated, isolated, sequential, hierarchy, authorityKeys);
                 if (candidate != null) tableCandidates.add(candidate);
             } catch (Throwable failure) {
                 failures.add(shortReason(failure));
@@ -210,7 +220,8 @@ public final class ZkmNoPaddingLongArrayDeobfuscator {
                                     int factoryIndex, Map<String, Long> validated,
                                     Map<String, Long> isolated,
                                     Map<String, Long> sequential,
-                                    Map<String, Long> hierarchy) throws Exception {
+                                    Map<String, Long> hierarchy,
+                                    Map<String, Long> authorityKeys) throws Exception {
         int start = factoryIndex - 1;
         if (start < 0 || !(code.nodes.get(start) instanceof LdcInsnNode)
                 || !ALGORITHM.equals(((LdcInsnNode) code.nodes.get(start)).cst)) return null;
@@ -289,7 +300,7 @@ public final class ZkmNoPaddingLongArrayDeobfuscator {
         validateSetupShape(code, start, allocation.storeIndex, loops.size());
         validateBoundary(owner, clinit, code, start, continuationIndex);
         KeySelection keys = selectKey(owner, code, start, allocation.allocationIndex,
-                validated, isolated, sequential, hierarchy);
+                validated, isolated, sequential, hierarchy, authorityKeys);
         candidate.key = keys.outerKey;
         candidate.classKey = keys.classKey;
         candidate.outerMask = keys.outerMask;
@@ -414,9 +425,20 @@ public final class ZkmNoPaddingLongArrayDeobfuscator {
 
     private static void validateBoundary(ClassNode owner, MethodNode method, Code code,
                                          int start, int continuation) throws Exception {
-        if (method.tryCatchBlocks != null && !method.tryCatchBlocks.isEmpty()) {
-            throw new IllegalArgumentException("clinit-exception-ranges="
-                    + method.tryCatchBlocks.size());
+        if (method.tryCatchBlocks != null) {
+            for (org.objectweb.asm.tree.TryCatchBlockNode block : method.tryCatchBlocks) {
+                int protectedStart = code.target(block.start);
+                int protectedEnd = code.target(block.end);
+                int handler = code.target(block.handler);
+                boolean protectedOverlap = protectedStart < continuation
+                        && protectedEnd > start;
+                boolean handlerInside = handler >= start && handler < continuation;
+                if (protectedStart < 0 || protectedEnd < 0 || handler < 0
+                        || protectedOverlap || handlerInside) {
+                    throw new IllegalArgumentException("clinit-exception-overlap="
+                            + protectedStart + ".." + protectedEnd + "->" + handler);
+                }
+            }
         }
         Analyzer<BasicValue> analyzer = new Analyzer<>(new BasicVerifier());
         Frame<BasicValue>[] frames = analyzer.analyze(owner.name, method);
@@ -434,7 +456,8 @@ public final class ZkmNoPaddingLongArrayDeobfuscator {
                                           int allocation, Map<String, Long> validated,
                                           Map<String, Long> isolated,
                                           Map<String, Long> sequential,
-                                          Map<String, Long> hierarchy) {
+                                          Map<String, Long> hierarchy,
+                                          Map<String, Long> authorityKeys) {
         Set<Long> literals = new LinkedHashSet<>();
         Set<Integer> longLoads = new LinkedHashSet<>();
         for (int index = start; index <= allocation; index++) {
@@ -506,9 +529,14 @@ public final class ZkmNoPaddingLongArrayDeobfuscator {
         if (!bootstrap || !transform) {
             throw new IllegalArgumentException("state-key-chain=" + bootstrap + "/" + transform);
         }
-        Long classKey = validated.get(owner.name);
-        String source = "validated-string-key";
-        boolean trusted = isTrustedStateKey(classKey, isolated.get(owner.name));
+        Long classKey = authorityKeys.get(owner.name);
+        String source = "pre-removal-authority-jvm-chain";
+        boolean trusted = classKey != null;
+        if (classKey == null) {
+            classKey = validated.get(owner.name);
+            source = "validated-string-key";
+            trusted = isTrustedStateKey(classKey, isolated.get(owner.name));
+        }
         if (classKey == null) {
             // Isolated execution is useful as a diagnostic candidate, but the
             // state graph is order-sensitive.  It is not rewrite authority.
@@ -522,6 +550,17 @@ public final class ZkmNoPaddingLongArrayDeobfuscator {
         result.source = source;
         result.trusted = trusted;
         result.stateDerived = true;
+        return result;
+    }
+
+    private static Map<String, Long> authorityKeys(Path authority) throws Exception {
+        Map<String, ZkmNoPaddingLiteralFragmentDeobfuscator.KeyProof> proofs =
+                ZkmNoPaddingStateFragmentDeobfuscator.keyProofs(authority);
+        Map<String, Long> result = new LinkedHashMap<>();
+        for (Map.Entry<String, ZkmNoPaddingLiteralFragmentDeobfuscator.KeyProof> entry
+                : proofs.entrySet()) {
+            result.put(entry.getKey(), entry.getValue().classKey);
+        }
         return result;
     }
 
@@ -868,10 +907,26 @@ public final class ZkmNoPaddingLongArrayDeobfuscator {
     }
 
     private static byte[] writeClass(ClassNode owner, Map<String, ClassNode> hierarchy) {
-        ClassWriter writer = new HierarchyClassWriter(ClassWriter.COMPUTE_FRAMES
-                | ClassWriter.COMPUTE_MAXS, hierarchy);
+        int flags = containsLegacySubroutine(owner)
+                ? ClassWriter.COMPUTE_MAXS
+                : ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS;
+        ClassWriter writer = flags == ClassWriter.COMPUTE_MAXS
+                ? new ClassWriter(flags)
+                : new HierarchyClassWriter(flags, hierarchy);
         owner.accept(writer);
         return writer.toByteArray();
+    }
+
+    private static boolean containsLegacySubroutine(ClassNode owner) {
+        for (MethodNode method : owner.methods) {
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
+                 insn = insn.getNext()) {
+                if (insn.getOpcode() == Opcodes.JSR || insn.getOpcode() == Opcodes.RET) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static void verifyClass(byte[] bytes) throws Exception {

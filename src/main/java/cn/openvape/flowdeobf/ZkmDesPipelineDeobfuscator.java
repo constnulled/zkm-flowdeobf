@@ -310,7 +310,8 @@ public final class ZkmDesPipelineDeobfuscator {
                 stageOutput(staging, round, stage++, "nopadding-scalar")), stages);
         current = accept(stageLongArray(current,
                 stageReport(roundReport, stage, "nopadding-long-array"),
-                stageOutput(staging, round, stage++, "nopadding-long-array")), stages);
+                stageOutput(staging, round, stage++, "nopadding-long-array"),
+                authority), stages);
         current = accept(stageLiteralFragment(current,
                 stageReport(roundReport, stage, "nopadding-literal-fragment"),
                 stageOutput(staging, round, stage++, "nopadding-literal-fragment")), stages);
@@ -708,10 +709,12 @@ public final class ZkmDesPipelineDeobfuscator {
         return new StageExecution(output == null ? input : output, stage);
     }
 
-    private static StageExecution stageLongArray(Path input, Path report, Path output)
+    private static StageExecution stageLongArray(Path input, Path report, Path output,
+                                                 Path authority)
             throws Exception {
         ZkmNoPaddingLongArrayDeobfuscator.Summary result =
-                ZkmNoPaddingLongArrayDeobfuscator.rewrite(input, report, output);
+                ZkmNoPaddingLongArrayDeobfuscator.rewrite(input, report, output,
+                        authority);
         StageResult stage = new StageResult("nopadding-long-array", input, output,
                 result.proven, result.changedClasses,
                 result.rollbacks + result.outputVerificationErrors,

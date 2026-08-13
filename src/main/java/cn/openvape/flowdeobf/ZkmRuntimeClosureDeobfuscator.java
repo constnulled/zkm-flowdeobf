@@ -47,6 +47,7 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
@@ -137,6 +138,7 @@ public final class ZkmRuntimeClosureDeobfuscator {
         ProofSet proofs = proveJvmInitializationChains(archive.classes);
         Map<String, ClassNode> authorityClasses =
                 ZkmLongKeyEvaluator.readClasses(authority);
+        proofs.authorityClasses.putAll(authorityClasses);
         addAuthorityCandidates(proofs, authorityClasses);
         proofs.authority = authority.toAbsolutePath().normalize().toString();
         return close(input, reportDirectory, output, entries, archive, proofs,
@@ -154,6 +156,7 @@ public final class ZkmRuntimeClosureDeobfuscator {
         ProofSet proofs = proveJvmInitializationChains(archive.classes);
         Map<String, ClassNode> authorityClasses =
                 ZkmLongKeyEvaluator.readClasses(authority);
+        proofs.authorityClasses.putAll(authorityClasses);
         addAuthorityCandidates(proofs, authorityClasses);
         proofs.authority = authority.toAbsolutePath().normalize().toString();
         proofs.semanticEvidence = semanticEvidence.toAbsolutePath().normalize().toString();
@@ -191,6 +194,7 @@ public final class ZkmRuntimeClosureDeobfuscator {
         summary.authority = proofs.authority;
         summary.provenanceRows.addAll(proofs.rows);
         Path firstStage = null;
+        Path memberStage = null;
         Path cleanedStage = null;
         try {
             for (String runtime : RUNTIME_CLASSES) {
@@ -266,6 +270,9 @@ public final class ZkmRuntimeClosureDeobfuscator {
             Files.createDirectories(outputParent);
             firstStage = Files.createTempFile(outputParent,
                     ".zkm-runtime-closure-key-", ".jar");
+            memberStage = Files.createTempFile(outputParent,
+                    ".zkm-runtime-closure-member-", ".jar");
+            Files.deleteIfExists(memberStage);
             cleanedStage = Files.createTempFile(outputParent,
                     ".zkm-runtime-closure-bootstrap-", ".jar");
             Files.deleteIfExists(cleanedStage);
@@ -289,8 +296,24 @@ public final class ZkmRuntimeClosureDeobfuscator {
                 return summary;
             }
 
+            ZkmMemberIndyDirectizer.Summary member =
+                    ZkmMemberIndyDirectizer.directizeIdentity(firstStage,
+                            reportDirectory.resolve("member-directization"),
+                            memberStage);
+            summary.helperTotalDirectizedSites = member.rewrittenSites;
+            if (!member.outputCommitted || member.remainingMemberSites != 0
+                    || !Files.isRegularFile(memberStage)) {
+                fail(summary, "member-directization", "<archive>", "<output>",
+                        "member-directizer-not-closed", "rewritten="
+                                + member.rewrittenSites + ";remaining="
+                                + member.remainingMemberSites + ";rollbacks="
+                                + member.classRollbacks);
+                writeReports(input, output, reportDirectory, summary);
+                return summary;
+            }
+
             ZkmBootstrapSupportCleaner.Summary cleaner =
-                    ZkmBootstrapSupportCleaner.clean(firstStage,
+                    ZkmBootstrapSupportCleaner.clean(memberStage,
                             reportDirectory.resolve("bootstrap-cleanup"), cleanedStage);
             summary.bootstrapFamiliesRemoved = cleaner.verifiedFamilies;
             summary.bootstrapMethodsRemoved = cleaner.methodsRemoved;
@@ -329,6 +352,7 @@ public final class ZkmRuntimeClosureDeobfuscator {
             return summary;
         } finally {
             if (firstStage != null) Files.deleteIfExists(firstStage);
+            if (memberStage != null) Files.deleteIfExists(memberStage);
             if (cleanedStage != null) Files.deleteIfExists(cleanedStage);
         }
     }
@@ -753,13 +777,22 @@ public final class ZkmRuntimeClosureDeobfuscator {
             String field = keyField(owner, clinit);
             List<Long> table = spec == null || clinit == null || field == null
                     ? null : literalLongTable(owner, clinit, spec.tableField);
+            ClassNode authorityOwner = proofs.authorityClasses.get(owner.name);
+            ZkmIntegerDecryptor.IntegerProof authorityShape = authorityOwner == null
+                    || baseKey == null ? null
+                    : ZkmIntegerDecryptor.proveClassKey(authorityOwner, baseKey);
+            int authorityTableSize = authorityShape == null
+                    ? 0 : authorityShape.tableEntries;
+            boolean authorityTable = (table == null || table.isEmpty())
+                    && authorityOwner != null && authorityTableSize > 0;
             if (baseKey == null || spec == null || field == null
-                    || table == null || table.isEmpty()) {
+                    || ((table == null || table.isEmpty()) && !authorityTable)) {
                 invalidateIntegerKey(proofs, owner.name);
                 fail(summary, "integer-key-oracle", owner.name, "<class>",
                         "oracle-shape", "base=" + (baseKey != null) + ";spec="
                                 + (spec != null) + ";field=" + field + ";table="
-                                + (table == null ? "null" : table.size()));
+                                + (table == null ? "null" : table.size())
+                                + ";authority-table=" + authorityTableSize);
                 continue;
             }
             Set<Long> available = proofs.candidates.get(owner.name);
@@ -773,32 +806,49 @@ public final class ZkmRuntimeClosureDeobfuscator {
                 }
             }
             List<Long> passing = new ArrayList<>();
+            Map<Long, List<Integer>> passingValues = new LinkedHashMap<>();
             Map<MethodNode, Frame<SourceValue>[]> frames = new IdentityHashMap<>();
             if (!expanded.isEmpty()) {
                 for (Long candidate : expanded) {
                     if (!integerIndexesInRange(owner, field, candidate, sites, spec,
-                            table.size(), frames)) continue;
-                    List<Integer> values = decryptIntegerSites(owner, field,
-                            candidate, sites, spec, table, frames);
-                    if (values != null && values.size() == sites.size()) {
-                        passing.add(candidate);
+                            authorityTable ? authorityTableSize : table.size(), frames)) {
+                        continue;
+                    }
+                    if (authorityTable) {
+                        ZkmIntegerDecryptor.IntegerProof proof =
+                                ZkmIntegerDecryptor.proveClassKey(authorityOwner,
+                                        candidate);
+                        if (proof.passes() && proof.values.size() == sites.size()) {
+                            passing.add(candidate);
+                            passingValues.put(candidate,
+                                    new ArrayList<Integer>(proof.values));
+                        }
+                    } else {
+                        List<Integer> values = decryptIntegerSites(owner, field,
+                                candidate, sites, spec, table, frames);
+                        if (values != null && values.size() == sites.size()) {
+                            passing.add(candidate);
+                            passingValues.put(candidate, values);
+                        }
                     }
                 }
             }
-            if (passing.size() != 1) {
+            Long selected = selectProvenBaseKey(baseKey, passing);
+            if (selected == null) {
                 invalidateIntegerKey(proofs, owner.name);
                 fail(summary, "integer-key-oracle", owner.name, "<class>",
                         "non-unique-authority-candidate", "available="
                                 + (available == null ? 0 : available.size())
                                 + ";expanded=" + expanded.size() + ";passing="
-                                + passing.size() + ";"
-                                + describeIntegerCandidates(owner, field, passing,
-                                sites, spec, table, frames));
+                                + passing.size() + ";base=" + hex(baseKey)
+                                + ";passing-values="
+                                + describePassingValues(passing, passingValues) + ";"
+                                + (authorityTable ? "authority-table="
+                                + authorityTableSize : describeIntegerCandidates(owner,
+                                field, passing, sites, spec, table, frames)));
                 continue;
             }
-            long selected = passing.get(0);
-            List<Integer> values = decryptIntegerSites(owner, field, selected,
-                    sites, spec, table, frames);
+            List<Integer> values = passingValues.get(selected);
             if (values == null || values.size() != sites.size()) {
                 invalidateIntegerKey(proofs, owner.name);
                 fail(summary, "integer-key-oracle", owner.name, "<class>",
@@ -810,13 +860,33 @@ public final class ZkmRuntimeClosureDeobfuscator {
             proofs.keys.put(owner.name, selected);
             replaceProvenanceRow(proofs.rows, owner.name,
                     tsv(owner.name, hex(selected), owner.name + ";base=" + hex(baseKey),
-                            "pre-removal-authority+explicit-integer-table-unique"));
+                    passing.size() == 1
+                            ? "pre-removal-authority+explicit-integer-table-unique"
+                            : "jvm-init-chain-exact+authority-table-all-sites-pass"));
             summary.integerProofRows.add(tsv(owner.name, hex(selected), sites.size(),
                     sites.size(), sites.size(), values.size(), "PASS_AUTHORITY_ORACLE",
-                    "base=" + hex(baseKey) + ";table=" + table.size()
-                            + ";available=" + available.size() + ";values="
+                    "base=" + hex(baseKey) + ";table="
+                            + (authorityTable ? authorityTableSize : table.size())
+                            + ";available=" + available.size() + ";passing="
+                            + passing.size() + ";values="
                             + joinIntegers(values)));
         }
+    }
+
+    static Long selectProvenBaseKey(Long baseKey, List<Long> passing) {
+        if (passing.size() == 1) return passing.get(0);
+        return baseKey != null && passing.contains(baseKey) ? baseKey : null;
+    }
+
+    private static String describePassingValues(
+            List<Long> passing, Map<Long, List<Integer>> passingValues) {
+        StringBuilder result = new StringBuilder();
+        for (Long candidate : passing) {
+            if (result.length() != 0) result.append('|');
+            result.append(hex(candidate)).append(':')
+                    .append(joinIntegers(passingValues.get(candidate)));
+        }
+        return result.toString();
     }
 
     private static void invalidateUncoveredIntegerKeys(
@@ -978,6 +1048,15 @@ public final class ZkmRuntimeClosureDeobfuscator {
             }
         } catch (Throwable ignored) {
             // Model candidates remain available; the final consumer gate is mandatory.
+        }
+        ProofSet authorityChains = proveJvmInitializationChains(classes);
+        for (Map.Entry<String, Long> entry : authorityChains.keys.entrySet()) {
+            if (!proofs.keys.containsKey(entry.getKey())) continue;
+            proofs.addCandidate(entry.getKey(), entry.getValue());
+            proofs.keys.put(entry.getKey(), entry.getValue());
+            replaceProvenanceRow(proofs.rows, entry.getKey(),
+                    tsv(entry.getKey(), hex(entry.getValue()), entry.getKey(),
+                            "pre-removal-authority-jvm-initialization-chain"));
         }
     }
 
@@ -1632,7 +1711,12 @@ public final class ZkmRuntimeClosureDeobfuscator {
             if (RUNTIME_CLASSES.contains(name)) continue;
             ClassNode owner = classes.get(name);
             try {
-                ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+                int flags = containsLegacySubroutine(owner)
+                        ? ClassWriter.COMPUTE_MAXS
+                        : ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS;
+                ClassWriter writer = flags == ClassWriter.COMPUTE_MAXS
+                        ? new ClassWriter(flags)
+                        : new HierarchyClassWriter(flags, classes);
                 owner.accept(writer);
                 byte[] bytes = writer.toByteArray();
                 verifyClass(bytes);
@@ -1644,6 +1728,18 @@ public final class ZkmRuntimeClosureDeobfuscator {
         }
         summary.changedClasses = result.size();
         return result;
+    }
+
+    private static boolean containsLegacySubroutine(ClassNode owner) {
+        for (MethodNode method : owner.methods) {
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
+                 insn = insn.getNext()) {
+                if (insn.getOpcode() == Opcodes.JSR || insn.getOpcode() == Opcodes.RET) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static void verifyClass(byte[] bytes) throws Exception {
@@ -2435,6 +2531,7 @@ public final class ZkmRuntimeClosureDeobfuscator {
     private static final class ProofSet {
         final Map<String, Long> keys = new LinkedHashMap<>();
         final Map<String, Set<Long>> candidates = new LinkedHashMap<>();
+        final Map<String, ClassNode> authorityClasses = new LinkedHashMap<>();
         final List<String> rows = new ArrayList<>();
         String authority = "";
         String semanticEvidence = "";
@@ -2584,6 +2681,72 @@ public final class ZkmRuntimeClosureDeobfuscator {
     private static final class ParsedArchive {
         final Map<String, ClassNode> classes = new LinkedHashMap<>();
         final Map<String, String> entryNames = new LinkedHashMap<>();
+    }
+
+    private static final class HierarchyClassWriter extends ClassWriter {
+        private final Map<String, ClassNode> classes;
+
+        HierarchyClassWriter(int flags, Map<String, ClassNode> classes) {
+            super(flags);
+            this.classes = classes;
+        }
+
+        @Override
+        protected String getCommonSuperClass(String left, String right) {
+            if (left.equals(right)) return left;
+            if (left.startsWith("[") || right.startsWith("[")) {
+                return commonArray(left, right);
+            }
+            if (isAssignable(left, right)) return left;
+            if (isAssignable(right, left)) return right;
+            Set<String> rightTypes = new LinkedHashSet<>(orderedSupertypes(right));
+            for (String type : orderedSupertypes(left)) {
+                if (rightTypes.contains(type)) return type;
+            }
+            return "java/lang/Object";
+        }
+
+        private String commonArray(String left, String right) {
+            if (!left.startsWith("[") || !right.startsWith("[")) return "java/lang/Object";
+            Type a = Type.getType(left);
+            Type b = Type.getType(right);
+            if (a.getDimensions() != b.getDimensions()) return "java/lang/Object";
+            Type ea = a.getElementType();
+            Type eb = b.getElementType();
+            if (ea.getSort() != Type.OBJECT || eb.getSort() != Type.OBJECT) {
+                return left.equals(right) ? left : "java/lang/Object";
+            }
+            String common = getCommonSuperClass(ea.getInternalName(), eb.getInternalName());
+            StringBuilder descriptor = new StringBuilder();
+            for (int index = 0; index < a.getDimensions(); index++) descriptor.append('[');
+            return descriptor.append('L').append(common).append(';').toString();
+        }
+
+        private boolean isAssignable(String target, String source) {
+            return "java/lang/Object".equals(target)
+                    || orderedSupertypes(source).contains(target);
+        }
+
+        private List<String> orderedSupertypes(String type) {
+            List<String> result = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            ArrayDeque<String> queue = new ArrayDeque<>();
+            queue.add(type);
+            while (!queue.isEmpty()) {
+                String current = queue.removeFirst();
+                if (!seen.add(current)) continue;
+                result.add(current);
+                ClassNode node = classes.get(current);
+                if (node != null) {
+                    if (node.superName != null) queue.addLast(node.superName);
+                    if (node.interfaces != null) queue.addAll(node.interfaces);
+                } else if (!"java/lang/Object".equals(current)) {
+                    queue.addLast("java/lang/Object");
+                }
+            }
+            if (!seen.contains("java/lang/Object")) result.add("java/lang/Object");
+            return result;
+        }
     }
 
     private static final class ArchiveEntry {

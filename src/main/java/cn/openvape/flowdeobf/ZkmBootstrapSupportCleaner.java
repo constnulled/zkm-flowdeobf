@@ -121,6 +121,19 @@ public final class ZkmBootstrapSupportCleaner {
             if (family.reason == null) validateReferences(family, references, blockers);
         }
         rejectOverlaps(families, blockers);
+        for (Family family : families) {
+            if (family.reason == null) continue;
+            if (family.externalReferences != 0) continue;
+            boolean retainedField = family.reason.startsWith("non-private-static-field:");
+            boolean retainedConditionalInitializer = family.reason.startsWith(
+                    "clinit-slice:cfg-island-conditional-business-sink");
+            if (!retainedField && !retainedConditionalInitializer) continue;
+            if (!references.methodRefs.getOrDefault(family.root,
+                    Collections.<RefSite>emptyList()).isEmpty()) continue;
+            family.retainedReason = family.reason;
+            family.reason = null;
+            family.rootOnly = true;
+        }
 
         Map<String, List<Family>> eligibleByClass = new LinkedHashMap<>();
         for (Family family : families) {
@@ -149,7 +162,7 @@ public final class ZkmBootstrapSupportCleaner {
                 replacements.put(ownerName, bytes);
                 summary.changedClasses++;
                 for (Family family : entry.getValue()) {
-                    family.status = "VERIFIED";
+                    family.status = family.rootOnly ? "VERIFIED_METHODS_ONLY" : "VERIFIED";
                     summary.verifiedFamilies++;
                 }
             } catch (Throwable failure) {
@@ -1252,27 +1265,32 @@ public final class ZkmBootstrapSupportCleaner {
         Set<MethodRef> methods = new LinkedHashSet<>();
         Set<FieldRef> fields = new LinkedHashSet<>();
         for (Family family : families) {
-            remove.addAll(family.clinitNodes);
-            methods.addAll(family.methods);
-            fields.addAll(family.fields);
-            for (MethodRef method : family.methods) {
+            if (!family.rootOnly) remove.addAll(family.clinitNodes);
+            Set<MethodRef> removedMethods = family.methods;
+            methods.addAll(removedMethods);
+            if (!family.rootOnly) fields.addAll(family.fields);
+            for (MethodRef method : removedMethods) {
                 members.add(tsv(owner.name, family.kind.name().toLowerCase(Locale.ROOT),
                         "method", method.name, method.desc, "remove"));
             }
-            for (FieldRef field : family.fields) {
-                members.add(tsv(owner.name, family.kind.name().toLowerCase(Locale.ROOT),
-                        "field", field.name, field.desc, "remove"));
+            if (!family.rootOnly) {
+                for (FieldRef field : family.fields) {
+                    members.add(tsv(owner.name, family.kind.name().toLowerCase(Locale.ROOT),
+                            "field", field.name, field.desc, "remove"));
+                }
             }
         }
-        for (AbstractInsnNode insn = clinit.instructions.getFirst(); insn != null; ) {
-            AbstractInsnNode next = insn.getNext();
-            if (remove.contains(insn)) clinit.instructions.remove(insn);
-            insn = next;
-        }
-        for (AbstractInsnNode insn = clinit.instructions.getFirst(); insn != null; ) {
-            AbstractInsnNode next = insn.getNext();
-            if (insn instanceof FrameNode) clinit.instructions.remove(insn);
-            insn = next;
+        if (!remove.isEmpty()) {
+            for (AbstractInsnNode insn = clinit.instructions.getFirst(); insn != null; ) {
+                AbstractInsnNode next = insn.getNext();
+                if (remove.contains(insn)) clinit.instructions.remove(insn);
+                insn = next;
+            }
+            for (AbstractInsnNode insn = clinit.instructions.getFirst(); insn != null; ) {
+                AbstractInsnNode next = insn.getNext();
+                if (insn instanceof FrameNode) clinit.instructions.remove(insn);
+                insn = next;
+            }
         }
         for (int i = owner.methods.size() - 1; i >= 0; i--) {
             MethodNode method = owner.methods.get(i);
@@ -1299,14 +1317,17 @@ public final class ZkmBootstrapSupportCleaner {
         Map<MethodRef, MethodNode> remainingMethods = methods(owner);
         Map<String, FieldNode> remainingFields = fields(owner);
         for (Family family : families) {
-            for (MethodRef method : family.methods) {
+            Set<MethodRef> removedMethods = family.methods;
+            for (MethodRef method : removedMethods) {
                 if (remainingMethods.containsKey(method)) {
                     throw new IllegalStateException("method-remains:" + method);
                 }
             }
-            for (FieldRef field : family.fields) {
-                if (remainingFields.containsKey(field.name + field.desc)) {
-                    throw new IllegalStateException("field-remains:" + field);
+            if (!family.rootOnly) {
+                for (FieldRef field : family.fields) {
+                    if (remainingFields.containsKey(field.name + field.desc)) {
+                        throw new IllegalStateException("field-remains:" + field);
+                    }
                 }
             }
         }
@@ -1344,7 +1365,9 @@ public final class ZkmBootstrapSupportCleaner {
                     family.root.name + family.root.desc, family.methods.size(),
                     family.fields.size(), ranges, instructions,
                     family.liveBootstrapReferences, family.externalReferences,
-                    family.status, family.reason == null ? "" : family.reason));
+                    family.status, family.reason != null ? family.reason
+                            : family.rootOnly ? "retained-support:" + family.retainedReason
+                            : ""));
         }
         Files.write(reportDirectory.resolve("families.tsv"), familyRows,
                 StandardCharsets.UTF_8);
@@ -1422,6 +1445,8 @@ public final class ZkmBootstrapSupportCleaner {
         final List<Range> ranges = new ArrayList<>();
         int externalReferences;
         int liveBootstrapReferences;
+        boolean rootOnly;
+        String retainedReason;
         String status = "CANDIDATE";
         String reason;
 

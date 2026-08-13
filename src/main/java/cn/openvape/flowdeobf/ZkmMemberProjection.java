@@ -29,6 +29,7 @@ import org.objectweb.asm.tree.MethodNode;
  */
 public final class ZkmMemberProjection {
     public static final String IDENTITY_EXTERNAL = "IDENTITY_EXTERNAL";
+    public static final String IDENTITY_RAW = "IDENTITY_RAW";
     public static final String PROJECTED_METHOD_UNION = "PROJECTED_METHOD_UNION";
     public static final String PROJECTED_CURRENT_MEMBER = "PROJECTED_CURRENT_MEMBER";
     public static final String AMBIGUOUS_METHOD_UNION = "AMBIGUOUS_METHOD_UNION";
@@ -47,6 +48,12 @@ public final class ZkmMemberProjection {
         return new Mapping(loadClassMappings(classMap), loadMethodMappings(methodMap));
     }
 
+    /** Uses decoded archive symbols directly without semantic mapping. */
+    public static Mapping identity() {
+        return new Mapping(Collections.<ClassMapping>emptyList(),
+                Collections.<MethodMapping>emptyList(), true);
+    }
+
     /** Immutable mapping metadata plus an audit of projection calls. */
     public static final class Mapping {
         private final List<ClassMapping> classMappings;
@@ -54,14 +61,21 @@ public final class ZkmMemberProjection {
         private final Map<String, List<ClassMapping>> canonicalClasses;
         private final Map<MethodKey, List<MethodMapping>> methods;
         private final MutableAudit audit = new MutableAudit();
+        private final boolean identity;
 
         private Mapping(List<ClassMapping> classMappings,
                         List<MethodMapping> methodMappings) {
+            this(classMappings, methodMappings, false);
+        }
+
+        private Mapping(List<ClassMapping> classMappings,
+                        List<MethodMapping> methodMappings, boolean identity) {
             this.classMappings = Collections.unmodifiableList(
                     new ArrayList<>(classMappings));
             this.exactClasses = indexExactClasses(classMappings);
             this.canonicalClasses = indexCanonicalClasses(classMappings);
             this.methods = indexMethods(methodMappings);
+            this.identity = identity;
         }
 
         /**
@@ -88,6 +102,10 @@ public final class ZkmMemberProjection {
 
         private ProjectedTarget resolve(ZkmMemberIndyDeobfuscator.MemberTarget raw,
                                         Map<String, ClassNode> classes) {
+            if (identity) {
+                return resolved(raw, 1, raw.owner, raw.name, raw.desc,
+                        IDENTITY_RAW, "decoded-archive-symbol");
+            }
             if (!raw.owner.startsWith("a/")) {
                 return resolved(raw, 1, raw.owner, raw.name, raw.desc,
                         IDENTITY_EXTERNAL, "non-obfuscated-owner");

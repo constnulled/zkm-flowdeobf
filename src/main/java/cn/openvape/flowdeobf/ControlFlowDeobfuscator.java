@@ -530,7 +530,7 @@ public final class ControlFlowDeobfuscator {
                 cn.methods.set(cn.methods.indexOf(method), method);
                 // Every rule above may change normal or exceptional CFG edges.
                 // Reusing stale StackMapTable frames is invalid even in safe mode.
-                byte[] candidate = writeClass(cn, hierarchy, true);
+                byte[] candidate = writeClass(cn, hierarchy, shouldComputeFrames(cn));
                 String validationFailure = structuralValidationFailure(candidate);
                 if (validationFailure != null) {
                     throw new IllegalStateException("class-validation:" + validationFailure);
@@ -544,7 +544,7 @@ public final class ControlFlowDeobfuscator {
                 rows.add(row(owner, method.name + method.desc, -1, "skip", "verification:" + shortReason(t)));
             }
         }
-        return new Result(changed ? writeClass(cn, hierarchy, true)
+        return new Result(changed ? writeClass(cn, hierarchy, shouldComputeFrames(cn))
                 : original, changed, failures);
     }
 
@@ -2788,6 +2788,18 @@ public final class ControlFlowDeobfuscator {
                 ? new ArchiveClassWriter(ClassWriter.COMPUTE_FRAMES, hierarchy)
                 : new ClassWriter(ClassWriter.COMPUTE_MAXS);
         cn.accept(cw); return cw.toByteArray();
+    }
+
+    private static boolean shouldComputeFrames(ClassNode owner) {
+        if (owner.version > Opcodes.V1_6) return true;
+        for (MethodNode method : owner.methods) {
+            for (AbstractInsnNode instruction = method.instructions.getFirst();
+                 instruction != null; instruction = instruction.getNext()) {
+                int opcode = instruction.getOpcode();
+                if (opcode == Opcodes.JSR || opcode == Opcodes.RET) return false;
+            }
+        }
+        return true;
     }
 
     /** Closed-world hierarchy resolver; it never loads a class from the archive. */

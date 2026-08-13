@@ -3,6 +3,7 @@ package cn.openvape.flowdeobf;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
@@ -36,10 +37,12 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -104,6 +107,7 @@ public final class ZkmNoPaddingLiteralFragmentDeobfuscator {
         Files.createDirectories(reportDirectory);
         List<EntryBytes> entries = readEntries(input);
         Map<String, byte[]> originals = classBytes(entries);
+        Map<String, ClassNode> hierarchy = classNodes(originals);
         Summary summary = new Summary();
         summary.parsedClasses = originals.size();
         List<Candidate> candidates = new ArrayList<>();
@@ -141,7 +145,8 @@ public final class ZkmNoPaddingLiteralFragmentDeobfuscator {
                             throw new IllegalStateException("proof changed before mutation");
                         }
                         apply(rewritten, fresh);
-                    }, emitted -> assertRewritten(emitted, candidate));
+                    }, emitted -> assertRewritten(emitted, candidate),
+                    rewritten -> writeClass(rewritten, hierarchy));
             if (transaction.isCommitted()) {
                 replacements.put(name, transaction.bytes());
                 candidate.action = "REWRITE";
@@ -741,6 +746,37 @@ public final class ZkmNoPaddingLiteralFragmentDeobfuscator {
         return owner;
     }
 
+    private static Map<String, ClassNode> classNodes(Map<String, byte[]> bytes) {
+        Map<String, ClassNode> result = new LinkedHashMap<>();
+        for (Map.Entry<String, byte[]> entry : bytes.entrySet()) {
+            result.put(entry.getKey(), readClass(entry.getValue()));
+        }
+        return result;
+    }
+
+    private static byte[] writeClass(ClassNode owner, Map<String, ClassNode> hierarchy) {
+        int flags = containsLegacySubroutine(owner)
+                ? ClassWriter.COMPUTE_MAXS
+                : ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS;
+        ClassWriter writer = flags == ClassWriter.COMPUTE_MAXS
+                ? new ClassWriter(flags)
+                : new HierarchyClassWriter(flags, hierarchy);
+        owner.accept(writer);
+        return writer.toByteArray();
+    }
+
+    private static boolean containsLegacySubroutine(ClassNode owner) {
+        for (MethodNode method : owner.methods) {
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
+                 insn = insn.getNext()) {
+                if (insn.getOpcode() == Opcodes.JSR || insn.getOpcode() == Opcodes.RET) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private static void verifyClass(byte[] bytes) throws Exception {
         ClassReader reader = new ClassReader(bytes);
         reader.accept(new CheckClassAdapter(new ClassWriter(0), false), 0);
@@ -1086,6 +1122,75 @@ public final class ZkmNoPaddingLiteralFragmentDeobfuscator {
             this.comment = entry.getComment();
             this.extra = entry.getExtra();
             this.method = entry.getMethod();
+        }
+    }
+
+    private static final class HierarchyClassWriter extends ClassWriter {
+        private final Map<String, ClassNode> classes;
+
+        HierarchyClassWriter(int flags, Map<String, ClassNode> classes) {
+            super(flags);
+            this.classes = classes;
+        }
+
+        @Override
+        protected String getCommonSuperClass(String left, String right) {
+            if (left.equals(right)) return left;
+            if (left.startsWith("[") || right.startsWith("[")) {
+                return commonArray(left, right);
+            }
+            if (isAssignable(left, right)) return left;
+            if (isAssignable(right, left)) return right;
+            Set<String> rightTypes = supertypes(right);
+            for (String type : orderedSupertypes(left)) {
+                if (rightTypes.contains(type)) return type;
+            }
+            return "java/lang/Object";
+        }
+
+        private String commonArray(String left, String right) {
+            if (!left.startsWith("[") || !right.startsWith("[")) return "java/lang/Object";
+            Type a = Type.getType(left);
+            Type b = Type.getType(right);
+            if (a.getDimensions() != b.getDimensions()) return "java/lang/Object";
+            Type ea = a.getElementType();
+            Type eb = b.getElementType();
+            if (ea.getSort() != Type.OBJECT || eb.getSort() != Type.OBJECT) {
+                return left.equals(right) ? left : "java/lang/Object";
+            }
+            String common = getCommonSuperClass(ea.getInternalName(), eb.getInternalName());
+            StringBuilder descriptor = new StringBuilder();
+            for (int index = 0; index < a.getDimensions(); index++) descriptor.append('[');
+            return descriptor.append('L').append(common).append(';').toString();
+        }
+
+        private boolean isAssignable(String target, String source) {
+            return "java/lang/Object".equals(target) || supertypes(source).contains(target);
+        }
+
+        private Set<String> supertypes(String type) {
+            return new LinkedHashSet<>(orderedSupertypes(type));
+        }
+
+        private List<String> orderedSupertypes(String type) {
+            List<String> result = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            ArrayDeque<String> queue = new ArrayDeque<>();
+            queue.add(type);
+            while (!queue.isEmpty()) {
+                String current = queue.removeFirst();
+                if (!seen.add(current)) continue;
+                result.add(current);
+                ClassNode node = classes.get(current);
+                if (node != null) {
+                    if (node.superName != null) queue.addLast(node.superName);
+                    if (node.interfaces != null) queue.addAll(node.interfaces);
+                } else if (!"java/lang/Object".equals(current)) {
+                    queue.addLast("java/lang/Object");
+                }
+            }
+            if (!seen.contains("java/lang/Object")) result.add("java/lang/Object");
+            return result;
         }
     }
 }

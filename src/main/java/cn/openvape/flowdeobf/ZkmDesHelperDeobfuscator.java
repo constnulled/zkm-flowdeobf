@@ -172,6 +172,13 @@ public final class ZkmDesHelperDeobfuscator {
                                     public void verify(ClassNode owner) throws Exception {
                                         verifyPlan(owner, plan);
                                     }
+                                }, new ZkmClassRewriteTransaction.Emitter() {
+                                    @Override
+                                    public byte[] emit(ClassNode owner) {
+                                        ClassWriter writer = new ClassWriter(0);
+                                        owner.accept(writer);
+                                        return writer.toByteArray();
+                                    }
                                 });
                 if (result.isCommitted()) {
                     if (plan.directized == 0 && plan.methodsRemoved == 0) {

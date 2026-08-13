@@ -79,8 +79,6 @@ public final class ZkmAtomicPublicationGate {
     private static final String STANDARD_BSM_DESC =
             "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;"
                     + "Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
-    private static final String FORBIDDEN_RUNTIME_PREFIX =
-            ObfRuntimeNames.PKG;
     private static final Set<String> FORBIDDEN_RUNTIME = Collections.unmodifiableSet(
             new LinkedHashSet<String>(Arrays.asList(
                     ObfRuntimeNames.STATE_INTERFACE,
@@ -564,15 +562,11 @@ public final class ZkmAtomicPublicationGate {
             String dotted = name.replace('/', '.');
             if (text.contains(name) || text.contains(dotted)) return name;
         }
-        if (text.contains(FORBIDDEN_RUNTIME_PREFIX)
-                || text.contains(FORBIDDEN_RUNTIME_PREFIX.replace('/', '.'))) {
-            return FORBIDDEN_RUNTIME_PREFIX + "*";
-        }
         return null;
     }
 
     private static boolean isForbiddenRuntimeClass(String owner) {
-        return owner != null && owner.startsWith(FORBIDDEN_RUNTIME_PREFIX);
+        return owner != null && FORBIDDEN_RUNTIME.contains(owner);
     }
 
     private static boolean containsHandle(Object value) {
@@ -718,16 +712,13 @@ public final class ZkmAtomicPublicationGate {
         for (ParsedClass parsed : classes) {
             ClassNode owner = parsed.node;
             boolean supportOwner = false;
-            boolean ijHelper = false;
             for (MethodNode method : owner.methods) {
                 if (!isPrivateStatic(method.access)) continue;
                 if (STANDARD_BSM_DESC.equals(method.desc)
                         || MEMBER_BSM_DESC.equals(method.desc)) supportOwner = true;
-                if (STRING_INDY_DESC.equals(method.desc)
-                        || INTEGER_INDY_DESC.equals(method.desc)) ijHelper = true;
                 if (containsCipherFactory(method)) supportOwner = true;
             }
-            if (!supportOwner && !ijHelper) continue;
+            if (!supportOwner) continue;
             for (MethodNode method : owner.methods) {
                 if (isPrivateStatic(method.access)
                         && SUPPORT_DESCRIPTORS.contains(method.desc)) {
