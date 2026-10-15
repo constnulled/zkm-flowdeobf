@@ -9,17 +9,17 @@ version = '0.1.0'
 repositories { mavenCentral() }
 
 dependencies {
-    implementation 'org.ow2.asm:asm:9.7.1'
-    implementation 'org.ow2.asm:asm-tree:9.7.1'
-    implementation 'org.ow2.asm:asm-analysis:9.7.1'
-    implementation 'org.ow2.asm:asm-util:9.7.1'
-    implementation 'org.ow2.asm:asm-commons:9.7.1'
+    implementation 'org.ow2.asm:asm:9.11'
+    implementation 'org.ow2.asm:asm-tree:9.11'
+    implementation 'org.ow2.asm:asm-analysis:9.11'
+    implementation 'org.ow2.asm:asm-util:9.11'
+    implementation 'org.ow2.asm:asm-commons:9.11'
     testImplementation 'junit:junit:4.13.2'
 }
 
 application { mainClass = 'cn.openvape.flowdeobf.ControlFlowDeobfuscator' }
 
-java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }
+java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
