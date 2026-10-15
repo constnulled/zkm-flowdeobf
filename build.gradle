@@ -6,7 +6,9 @@ plugins {
 group = 'cn.openvape'
 version = '0.1.0'
 
-repositories { mavenCentral() }
+repositories {
+    mavenCentral()
+}
 
 dependencies {
     implementation 'org.ow2.asm:asm:9.11'
@@ -14,14 +16,39 @@ dependencies {
     implementation 'org.ow2.asm:asm-analysis:9.11'
     implementation 'org.ow2.asm:asm-util:9.11'
     implementation 'org.ow2.asm:asm-commons:9.11'
+
     testImplementation 'junit:junit:4.13.2'
 }
 
-application { mainClass = 'cn.openvape.flowdeobf.ControlFlowDeobfuscator' }
+application {
+    mainClass = 'cn.openvape.flowdeobf.ControlFlowDeobfuscator'
+}
 
-java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 8
+}
+
+tasks.named('jar', Jar) {
+    archiveClassifier = 'all'
+
+    manifest {
+        attributes(
+            'Main-Class': application.mainClass.get()
+        )
+    }
+
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from {
+        configurations.runtimeClasspath.collect {
+            it.isDirectory() ? it : zipTree(it)
+        }
+    }
 }
