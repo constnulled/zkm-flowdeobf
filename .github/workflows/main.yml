@@ -27,17 +27,20 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Make Gradle Wrapper executable
+        run: chmod +x gradlew
+
       - name: Build with Gradle
-        run: ./gradle build
+        run: ./gradlew build
 
       - name: Find JAR
         run: |
           echo "📦 build/libs/ contents:"
           ls -la build/libs/
 
-          JAR_FILE=$(ls build/libs/*.jar \
-            | grep -v original \
-            | grep -v sources \
+          JAR_FILE=$(find build/libs -maxdepth 1 -type f -name '*.jar' \
+            ! -name '*-original.jar' \
+            ! -name '*-sources.jar' \
             | head -n 1)
 
           if [ -z "$JAR_FILE" ]; then
@@ -61,7 +64,7 @@ jobs:
           else
             echo "_Changes since $LAST_TAG_" >> CHANGELOG.md
             echo "" >> CHANGELOG.md
-            git log $LAST_TAG..HEAD --pretty=format:"- %s (%h)" >> CHANGELOG.md
+            git log "$LAST_TAG"..HEAD --pretty=format:"- %s (%h)" >> CHANGELOG.md
           fi
 
       - name: Upload to GitHub Release
