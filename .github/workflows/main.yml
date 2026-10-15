@@ -28,9 +28,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build with Gradle
-        run: |
-          chmod +x ./gradlew
-          ./gradlew build--stacktrace
+        run: ./gradlew build--stacktrace
 
       - name: Find JAR
         run: |
